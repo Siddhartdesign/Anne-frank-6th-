@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Anne — Calendar Prototype</title>
+<style>
+*{box-sizing:border-box;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial}
+body{background:#f4f3f0;padding:20px;margin:0}
+.app{max-width:1100px;margin:0 auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 4px 16px rgba(0,0,0,.08)}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.topbar h1{margin:0;font-size:26px}
+.controls{display:flex;align-items:center;gap:12px;font-size:1.05rem}
+.controls button{padding:6px 10px;border-radius:6px;border:1px solid #ccc;background:#fafafa;cursor:pointer}
+.layout{display:flex;gap:25px}
+.entry-panel{width:300px;background:#f8f7f4;padding:16px;border-radius:10px}
+.entry-panel h2{font-size:1.1rem;margin:0 0 12px 0}
+.entry-content{white-space:pre-line;line-height:1.4;font-size:0.95rem;color:#222}
+.calendar{flex:1}
+.weekday-row{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font-weight:600;margin-bottom:10px;opacity:.75}
+.grid{display:grid;grid-template-columns:repeat(7,1fr);gap:12px}
+.day{background:#fff;border:1px solid #ddd;padding:18px;min-height:84px;border-radius:10px;position:relative;cursor:pointer;transition:.08s;font-size:1.05rem;display:flex;align-items:flex-start}
+.day:hover{background:#f0ece6}
+.day-number{font-size:1.2rem;font-weight:600}
+.has-entry{background:#fff7d1;border-color:#e6d186}
+.milestone-dot{width:10px;height:10px;background:#d4a017;border-radius:50%;position:absolute;top:8px;right:8px}
+.empty-cell{background:transparent;border:0;box-shadow:none;cursor:default;min-height:84px}
+@media (max-width:920px){
+  .layout{flex-direction:column}
+  .entry-panel{width:100%}
+  .grid{grid-template-columns:repeat(7,1fr)}
+  .day{min-height:64px;padding:12px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <h1>Anne — Calendar Prototype</h1>
+    <div class="controls">
+      <button id="prevMonth">←</button>
+      <span id="monthLabel"></span>
+      <button id="nextMonth">→</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="entry-panel" id="entryPanel">
+      <h2>Entries</h2>
+      <div id="entryContent" class="entry-content">Select a day</div>
+    </aside>
+
+    <main class="calendar">
+      <div class="weekday-row">
+        <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+      </div>
+      <div id="calendarGrid" class="grid"></div>
+    </main>
+  </div>
+</div>
+
+<script>
+/* ========== CONFIG ========== */
+const JSON_FILE = "Anne_Frank_Diary.json";
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+/* ========== STATE ========== */
+let entriesMap = {}; // "YYYY-MM-DD" => [entry, ...]
+let currentYear = 1942;
+let currentMonth = 5; // 0-based (June)
+let selectedDay = null;
+
+/* ========== HELPERS ========== */
+function pad(n){ return String(n).padStart(2,'0'); }
+function iso(y,m,d){ return `${y}-${pad(m+1)}-${pad(d)}`; }
+function parseDDMMYYYY(s){
+  if(!s) return null;
+  const parts = s.split("/");
+  if(parts.length !== 3) return null;
+  const d = Number(parts[0]), m = Number(parts[1]) - 1, y = Number(parts[2]);
+  return { y, m, d, dateObj: new Date(y, m, d) };
+}
+function includesYes(val){
+  if(!val) return false;
+  return String(val).toUpperCase().includes("YES");
+}
+function textPreview(text, max=240){
+  if(!text) return "";
+  if(text.length <= max) return text;
+  return text.slice(0, max).trim().replace(/\s+[^\s]*$/,'') + "…";
+}
+
+/* ========== LOAD & BUILD MAP ========== */
+fetch(JSON_FILE)
+  .then(r => {
+    if(!r.ok) throw new Error("Could not fetch JSON: " + r.status);
+    return r.json();
+  })
+  .then(json => {
+    buildEntriesMap(json.chronological_data || json.chronologicalData || {});
+    // set current month/year to earliest available if present
+    const earliest = findEarliestMonth();
+    if(earliest){ currentYear = earliest.year; currentMonth = earliest.month; }
+    renderCalendar();
+    autoSelectFirstEntryForMonth();
+  })
+  .catch(err => {
+    console.error(err);
+    document.getElementById('entryContent').textContent = "Unable to load JSON.";
+  });
+
+function buildEntriesMap(root){
+  entriesMap = {};
+  for(const yKey of Object.keys(root || {})){
+    const monthsObj = root[yKey];
+    for(const monthName of Object.keys(monthsObj)){
+      const arr = monthsObj[monthName] || [];
+      arr.forEach(item => {
+        const parsed = parseDDMMYYYY(item.date);
+        if(!parsed) return;
+        const key = iso(parsed.y, parsed.m, parsed.d);
+        if(!entriesMap[key]) entriesMap[key] = [];
+        // preserve original fields and also store parsed bits
+        entriesMap[key].push(Object.assign({}, item, {
+          _year: parsed.y, _month: parsed.m, _day: parsed.d, _jsDate: parsed.dateObj
+        }));
+      });
+    }
+  }
+}
+
+function findEarliestMonth(){
+  const keys = Object.keys(entriesMap);
+  if(!keys.length) return null;
+  let earliest = null;
+  keys.forEach(k=>{
+    const [y,mm,dd] = k.split("-").map(Number);
+    const d = new Date(y, mm-1, dd);
+    if(!earliest || d < earliest) earliest = d;
+  });
+  if(!earliest) return null;
+  return { year: earliest.getFullYear(), month: earliest.getMonth() };
+}
+
+/* ========== RENDERING ========== */
+const calendarGrid = document.getElementById('calendarGrid');
+const monthLabel = document.getElementById('monthLabel');
+const entryContent = document.getElementById('entryContent');
+
+function renderCalendar(){
+  calendarGrid.innerHTML = "";
+  monthLabel.textContent = `${MONTHS[currentMonth]} ${currentYear}`;
+
+  const firstDay = new Date(currentYear, currentMonth, 1).getDay();
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+
+  // leading blanks
+  for(let i=0;i<firstDay;i++){
+    const blank = document.createElement('div');
+    blank.className = 'empty-cell';
+    calendarGrid.appendChild(blank);
+  }
+
+  // day tiles
+  for(let d=1; d<=daysInMonth; d++){
+    const tile = document.createElement('div');
+    tile.className = 'day';
+    tile.innerHTML = `<div class="day-number">${d}</div>`;
+
+    const key = iso(currentYear, currentMonth, d);
+    const entries = entriesMap[key] || [];
+
+    if(entries.length){
+      tile.classList.add('has-entry');
+      // milestone dot if any entry for the day has milestone YES
+      const isMilestone = entries.some(e => includesYes(e.milestone));
+      if(isMilestone){
+        const dot = document.createElement('div');
+        dot.className = 'milestone-dot';
+        tile.appendChild(dot);
+      }
+      tile.addEventListener('click', ()=> {
+        selectedDay = d;
+        showEntryForDay(d);
+        renderCalendar(); // re-render to update selected style
+      });
+    } else {
+      tile.addEventListener('click', ()=> {
+        selectedDay = d;
+        clearEntryPanel();
+        renderCalendar();
+      });
+    }
+
+    // visually mark selected day (lighter tint)
+    if(selectedDay === d){
+      tile.classList.add('has-entry'); // keep tint
+      tile.style.boxShadow = 'inset 0 0 0 2px rgba(230,200,80,0.12)';
+    }
+
+    calendarGrid.appendChild(tile);
+  }
+
+  // trailing blanks to keep grid tidy
+  const total = firstDay + daysInMonth;
+  const needed = Math.ceil(total/7)*7;
+  for(let i=0;i<needed-total;i++){
+    const blank = document.createElement('div');
+    blank.className = 'empty-cell';
+    calendarGrid.appendChild(blank);
+  }
+}
+
+/* ========== ENTRY PANEL ========== */
+function showEntryForDay(day){
+  const key = iso(currentYear, currentMonth, day);
+  const arr = entriesMap[key] || [];
+  if(!arr.length){
+    entryContent.innerHTML = "<em>No entry for this day.</em>";
+    return;
+  }
+  // show first entry for the day
+  const e = arr[0];
+  entryContent.innerHTML = `
+    <div style="margin-bottom:10px;font-weight:700">${e.day_of_week || weekdayLabel(e._year, e._month, e._day)} — ${pad(e._day)}/${pad(e._month+1)}/${e._year}</div>
+    <div style="opacity:.75;margin-bottom:8px"><strong>Theme:</strong> ${e.theme || "-"}</div>
+    <div style="opacity:.75;margin-bottom:12px"><strong>Milestone:</strong> ${e.milestone || "No"}</div>
+    <div>${textPreview(e.text || "")}</div>
+  `;
+}
+
+function clearEntryPanel(){
+  entryContent.innerHTML = "Select a day";
+}
+
+/* ========== AUTO-SELECT FIRST ENTRY IN MONTH ========== */
+function autoSelectFirstEntryForMonth(){
+  // find keys in the month, sorted, pick earliest day
+  const keys = Object.keys(entriesMap).filter(k=>{
+    const [y,mm,dd] = k.split("-").map(Number);
+    return y === currentYear && (mm-1) === currentMonth;
+  }).sort();
+  if(keys.length){
+    const [y,mm,dd] = keys[0].split("-").map(Number);
+    selectedDay = dd;
+    showEntryForDay(dd);
+    renderCalendar();
+  } else {
+    selectedDay = null;
+    clearEntryPanel();
+  }
+}
+
+/* ========== UTILS ========== */
+function weekdayLabel(y,m,d){
+  const dt = new Date(y,m,d);
+  return dt.toLocaleDateString(undefined,{weekday:'long'});
+}
+
+/* ========== NAVIGATION ========== */
+document.getElementById('prevMonth').addEventListener('click', ()=>{
+  currentMonth--;
+  if(currentMonth < 0){ currentMonth = 11; currentYear--; }
+  autoSelectFirstEntryForMonth();
+});
+document.getElementById('nextMonth').addEventListener('click', ()=>{
+  currentMonth++;
+  if(currentMonth > 11){ currentMonth = 0; currentYear++; }
+  autoSelectFirstEntryForMonth();
+});
+
+</script>
+</body>
+</html>
